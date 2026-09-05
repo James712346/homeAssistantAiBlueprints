@@ -1,0 +1,164 @@
+blueprint:
+  name: Live Activity - Tumble Dryer
+  description: >
+    Pushes an iOS Live Activity / Android Live Update showing tumble dryer
+    progress on the Lock Screen. Updates on program/phase changes
+    immediately, and throttles the fast-changing percentage sensor to one
+    push every 30s (per Apple's rate-limit guidance) using mode: restart.
+    Optionally clears the activity a set number of minutes after the
+    cycle finishes.
+
+    Requires Home Assistant Core 2026.7.0+ and the companion app's Live
+    Activities feature (Labs, TestFlight on iOS 17.2+).
+  domain: automation
+  input:
+    notify_device:
+      name: Mobile App Device
+      selector:
+        device:
+          integration: mobile_app
+    operation_state_entity:
+      name: Operation State Sensor
+      description: e.g. sensor.tumble_dryer (off / waiting_to_start / run / finished)
+      default: sensor.tumble_dryer
+      selector:
+        entity:
+          domain: sensor
+    program_entity:
+      name: Program Sensor
+      default: sensor.tumble_dryer_program
+      selector:
+        entity:
+          domain: sensor
+    phase_entity:
+      name: Program Phase Sensor
+      default: sensor.tumble_dryer_program_phase
+      selector:
+        entity:
+          domain: sensor
+    percentage_entity:
+      name: Percentage Complete Sensor (0-100)
+      default: sensor.tumble_dryer_percentage
+      selector:
+        entity:
+          domain: sensor
+    door_entity:
+      name: Door Sensor (optional)
+      default: binary_sensor.tumble_dryer_door
+      selector:
+        entity:
+          domain: binary_sensor
+    finished_states:
+      name: States That Mean "Finished"
+      description: Comma-separated raw states of the operation state sensor.
+      default: "off,finished"
+      selector:
+        text:
+    clear_after_minutes:
+      name: Auto-Clear After Finished (minutes)
+      description: 0 disables auto-clear; the activity stays until the next cycle starts.
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 120
+          unit_of_measurement: min
+    activity_tag:
+      name: Activity Tag
+      default: dryer_cycle
+      selector:
+        text:
+    icon:
+      name: Icon
+      default: mdi:tumble-dryer
+      selector:
+        text:
+    color_running:
+      name: Color (Running)
+      default: "#FF9800"
+      selector:
+        text:
+    color_finished:
+      name: Color (Finished)
+      default: "#4CAF50"
+      selector:
+        text:
+
+mode: restart
+max_exceeded: silent
+
+trigger:
+  - trigger: state
+    entity_id: !input operation_state_entity
+    id: cycle
+  - trigger: state
+    entity_id: !input percentage_entity
+    id: percent
+
+variables:
+  operation_state_entity: !input operation_state_entity
+  program_entity: !input program_entity
+  phase_entity: !input phase_entity
+  percentage_entity: !input percentage_entity
+  door_entity: !input door_entity
+  finished_states: !input finished_states
+  clear_after_minutes: !input clear_after_minutes
+  activity_tag: !input activity_tag
+  icon: !input icon
+  color_running: !input color_running
+  color_finished: !input color_finished
+  notify_service: >-
+    {% if notify_device %}notify.mobile_app_{{ device_attr(notify_device, 'name') | slugify }}{% else %}notify.notify{% endif %}
+  finished_list: "{{ finished_states.split(',') | map('trim') | list }}"
+  is_finished: "{{ states(operation_state_entity) in finished_list }}"
+  percentage: "{{ states(percentage_entity) | int(0) }}"
+  program: "{{ states(program_entity) }}"
+  phase: "{{ states(phase_entity) }}"
+  door_open: "{{ door_entity and is_state(door_entity, 'on') }}"
+
+action:
+  - if: "{{ trigger.id == 'percent' }}"
+    then:
+      # Collapse a burst of percentage ticks into one push every 30s.
+      - delay: "00:00:30"
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ is_finished }}"
+        sequence:
+          - action: "{{ notify_service }}"
+            data:
+              title: Tumble Dryer
+              message: "Cycle complete"
+              data:
+                tag: "{{ activity_tag }}"
+                live_update: true
+                progress: 100
+                progress_max: 100
+                notification_icon: "{{ icon }}"
+                notification_icon_color: "{{ color_finished }}"
+                color: "{{ color_finished }}"
+          - if: "{{ clear_after_minutes | int(0) > 0 }}"
+            then:
+              - delay:
+                  minutes: "{{ clear_after_minutes | int(0) }}"
+              - action: "{{ notify_service }}"
+                data:
+                  message: clear_notification
+                  data:
+                    tag: "{{ activity_tag }}"
+    default:
+      - action: "{{ notify_service }}"
+        data:
+          title: Tumble Dryer
+          message: >-
+            {{ program if program not in ['unknown','unavailable',''] else 'Running' }}{% if phase not in ['unknown','unavailable',''] %} · {{ phase }}{% endif %}{% if door_open %} · Door Open{% endif %}
+          data:
+            tag: "{{ activity_tag }}"
+            live_update: true
+            critical_text: "{{ percentage }}%"
+            progress: "{{ percentage }}"
+            progress_max: 100
+            notification_icon: "{{ icon }}"
+            notification_icon_color: "{{ color_running }}"
+            color: "{{ color_running }}"
