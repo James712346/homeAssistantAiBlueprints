@@ -108,7 +108,7 @@ variables:
   color_running: !input color_running
   color_finished: !input color_finished
   notify_service: >-
-    notify.mobile_app_{{ device_attr(notify_device, 'name') | slugify }}
+    {% if notify_device %}notify.mobile_app_{{ device_attr(notify_device, 'name') | slugify }}{% else %}notify.notify{% endif %}
   finished_list: "{{ finished_states.split(',') | map('trim') | list }}"
   is_finished: "{{ states(operation_state_entity) in finished_list }}"
   percentage: "{{ states(percentage_entity) | int(0) }}"
