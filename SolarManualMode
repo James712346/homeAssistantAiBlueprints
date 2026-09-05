@@ -101,15 +101,16 @@ blueprint:
       default: "#4CAF50"
       selector:
         text:
-    update_interval:
-      name: Refresh Interval (minutes)
+    update_interval_seconds:
+      name: Refresh Interval (seconds)
       description: How often to refresh the stats while manual mode is on.
-      default: 5
+      default: 60
       selector:
         number:
-          min: 1
-          max: 60
-          unit_of_measurement: min
+          min: 20
+          max: 3600
+          step: 5
+          unit_of_measurement: s
     activity_tag:
       name: Activity Tag
       default: solar_manual
@@ -127,10 +128,12 @@ max_exceeded: silent
 trigger:
   - trigger: state
     entity_id: !input manual_mode_entity
-    id: mode_change
-  - trigger: time_pattern
-    minutes: !input update_interval
-    id: periodic
+    to: "on"
+    id: mode_on
+  - trigger: state
+    entity_id: !input manual_mode_entity
+    to: "off"
+    id: mode_off
 
 variables:
   manual_mode_entity: !input manual_mode_entity
@@ -148,34 +151,16 @@ variables:
   color_neutral: !input color_neutral
   activity_tag: !input activity_tag
   icon: !input icon
+  update_interval_seconds: !input update_interval_seconds
   notify_service: >-
     {% if notify_device %}notify.mobile_app_{{ device_attr(notify_device, 'name') | slugify }}{% else %}notify.notify{% endif %}
-  is_manual: "{{ is_state(manual_mode_entity, 'on') }}"
   unit_divisor: "{{ 1000 if grid_power_unit == 'W' else 1 }}"
-  solar_kw: "{{ (states(solar_entity) | float(0)) / unit_divisor | float }}"
-  consumption_kw: "{{ (states(consumption_entity) | float(0)) / unit_divisor | float }}"
-  grid_import_kw: "{{ (states(grid_import_entity) | float(0)) / unit_divisor | float }}"
-  grid_export_kw: "{{ (states(grid_export_entity) | float(0)) / unit_divisor | float }}"
-  net_kw: "{{ grid_import_kw | float(0) - grid_export_kw | float(0) }}"
-  is_importing: "{{ net_kw | float(0) > (neutral_threshold_kw | float(0)) }}"
-  is_exporting: "{{ net_kw | float(0) < -(neutral_threshold_kw | float(0)) }}"
-  flow_magnitude_kw: "{{ [net_kw | float(0) | abs, grid_scale_max_kw | float(0)] | min }}"
-  import_price: >-
-    {% if states(import_price_entity) not in ['unknown','unavailable',''] %}{{ '%.2f' | format(states(import_price_entity) | float(0)) }}{% else %}--{% endif %}
-  export_price: >-
-    {% if states(export_price_entity) not in ['unknown','unavailable',''] %}{{ '%.2f' | format(states(export_price_entity) | float(0)) }}{% else %}--{% endif %}
-
-condition:
-  # Ignore periodic ticks once manual mode is off - the mode_change trigger
-  # already handles the clear-on-off case below.
-  - condition: template
-    value_template: "{{ trigger.id == 'mode_change' or is_manual }}"
 
 action:
   - choose:
       - conditions:
           - condition: template
-            value_template: "{{ trigger.id == 'mode_change' and not is_manual }}"
+            value_template: "{{ trigger.id == 'mode_off' }}"
         sequence:
           - action: "{{ notify_service }}"
             data:
@@ -183,20 +168,48 @@ action:
               data:
                 tag: "{{ activity_tag }}"
     default:
-      - action: "{{ notify_service }}"
-        data:
-          title: Solar
-          message: >-
-            {% if is_importing %}Importing {{ '%.1f' | format(net_kw | float(0)) }} kW{% elif is_exporting %}Exporting {{ '%.1f' | format(net_kw | float(0) | abs) }} kW{% else %}Home {{ '%.1f' | format(consumption_kw | float(0)) }} kW · Solar {{ '%.1f' | format(solar_kw | float(0)) }} kW{% endif %}
-          data:
-            tag: "{{ activity_tag }}"
-            live_update: true
-            critical_text: >-
-              {% if is_importing %}${{ import_price }}{% elif is_exporting %}${{ export_price }}{% else %}{{ '' }}{% endif %}
-            progress: "{{ flow_magnitude_kw }}"
-            progress_max: "{{ grid_scale_max_kw }}"
-            notification_icon: "{{ icon }}"
-            notification_icon_color: >-
-              {% if is_importing %}{{ color_import }}{% elif is_exporting %}{{ color_export }}{% else %}{{ color_neutral }}{% endif %}
-            color: >-
-              {% if is_importing %}{{ color_import }}{% elif is_exporting %}{{ color_export }}{% else %}{{ color_neutral }}{% endif %}
+      # mode_on: push an update immediately, then keep refreshing on the
+      # configured interval for as long as manual mode stays on. A new
+      # trigger (mode flips off) restarts this automation (mode: restart)
+      # and cancels this loop instantly.
+      - repeat:
+          while:
+            - condition: state
+              entity_id: !input manual_mode_entity
+              state: "on"
+          sequence:
+            - variables:
+                solar_kw: "{{ (states(solar_entity) | float(0)) / unit_divisor | float }}"
+                consumption_kw: "{{ (states(consumption_entity) | float(0)) / unit_divisor | float }}"
+                grid_import_kw: "{{ (states(grid_import_entity) | float(0)) / unit_divisor | float }}"
+                grid_export_kw: "{{ (states(grid_export_entity) | float(0)) / unit_divisor | float }}"
+                net_kw: >-
+                  {{ (states(grid_import_entity) | float(0) - states(grid_export_entity) | float(0)) / unit_divisor | float }}
+                is_importing: >-
+                  {{ net_kw | float(0) > (neutral_threshold_kw | float(0)) }}
+                is_exporting: >-
+                  {{ net_kw | float(0) < -(neutral_threshold_kw | float(0)) }}
+                flow_magnitude_kw: "{{ [net_kw | float(0) | abs, grid_scale_max_kw | float(0)] | min }}"
+                import_price: >-
+                  {% if states(import_price_entity) not in ['unknown','unavailable',''] %}{{ '%.2f' | format(states(import_price_entity) | float(0)) }}{% else %}--{% endif %}
+                export_price: >-
+                  {% if states(export_price_entity) not in ['unknown','unavailable',''] %}{{ '%.2f' | format(states(export_price_entity) | float(0)) }}{% else %}--{% endif %}
+            - action: "{{ notify_service }}"
+              data:
+                title: Solar
+                message: >-
+                  {% if is_importing %}Importing {{ '%.1f' | format(net_kw | float(0)) }} kW{% elif is_exporting %}Exporting {{ '%.1f' | format(net_kw | float(0) | abs) }} kW{% else %}Home {{ '%.1f' | format(consumption_kw | float(0)) }} kW · Solar {{ '%.1f' | format(solar_kw | float(0)) }} kW{% endif %}
+                data:
+                  tag: "{{ activity_tag }}"
+                  live_update: true
+                  critical_text: >-
+                    {% if is_importing %}${{ import_price }}{% elif is_exporting %}${{ export_price }}{% else %}{{ '' }}{% endif %}
+                  progress: "{{ flow_magnitude_kw }}"
+                  progress_max: "{{ grid_scale_max_kw }}"
+                  notification_icon: "{{ icon }}"
+                  notification_icon_color: >-
+                    {% if is_importing %}{{ color_import }}{% elif is_exporting %}{{ color_export }}{% else %}{{ color_neutral }}{% endif %}
+                  color: >-
+                    {% if is_importing %}{{ color_import }}{% elif is_exporting %}{{ color_export }}{% else %}{{ color_neutral }}{% endif %}
+            - delay:
+                seconds: "{{ update_interval_seconds }}"
