@@ -1,0 +1,187 @@
+blueprint:
+  name: Live Activity - Solar Manual Mode
+  description: >
+    Pushes an iOS Live Activity / Android Live Update with a solar/battery
+    stats snapshot while you're in manual solar control mode. Starts the
+    activity the moment manual mode is switched on, refreshes it on a
+    timer while it stays on (power values change too continuously to
+    trigger on every tick), and clears it when manual mode is switched
+    off.
+
+    Requires Home Assistant Core 2026.7.0+ and the companion app's Live
+    Activities feature (Labs, TestFlight on iOS 17.2+).
+  domain: automation
+  input:
+    notify_device:
+      name: Mobile App Device
+      selector:
+        device:
+          integration: mobile_app
+    manual_mode_entity:
+      name: Manual Mode Toggle
+      default: input_boolean.toggle_solar_manual_control
+      selector:
+        entity:
+          domain: input_boolean
+    solar_entity:
+      name: Solar Generation Sensor
+      default: sensor.power_solar_generation_2
+      selector:
+        entity:
+          domain: sensor
+    consumption_entity:
+      name: Home Consumption Sensor
+      default: sensor.power_consumption_2
+      selector:
+        entity:
+          domain: sensor
+    grid_import_entity:
+      name: Grid Import Sensor
+      default: sensor.power_grid_import_2
+      selector:
+        entity:
+          domain: sensor
+    grid_export_entity:
+      name: Grid Export Sensor
+      default: sensor.power_grid_export_2
+      selector:
+        entity:
+          domain: sensor
+    battery1_entity:
+      name: Battery 1 State of Charge
+      default: sensor.solaredge_i1_b1_state_of_energy
+      selector:
+        entity:
+          domain: sensor
+    battery2_entity:
+      name: Battery 2 State of Charge (optional, leave blank if single battery)
+      default: sensor.solaredge_i1_b2_state_of_energy
+      selector:
+        entity:
+          domain: sensor
+    storage_mode_entity:
+      name: Storage Control Mode Select (optional)
+      default: select.solaredge_i1_storage_control_mode
+      selector:
+        entity:
+          domain: select
+    site_limit_entity:
+      name: Site/Export Limit Number (optional)
+      default: number.solaredge_i1_site_limit
+      selector:
+        entity:
+          domain: number
+    import_price_entity:
+      name: Import (General) Price Sensor
+      default: sensor.home_general_price
+      selector:
+        entity:
+          domain: sensor
+    export_price_entity:
+      name: Export (Feed-In) Price Sensor
+      default: sensor.home_feed_in_price
+      selector:
+        entity:
+          domain: sensor
+    update_interval:
+      name: Refresh Interval (minutes)
+      description: How often to refresh the stats while manual mode is on.
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 60
+          unit_of_measurement: min
+    activity_tag:
+      name: Activity Tag
+      default: solar_manual
+      selector:
+        text:
+    icon:
+      name: Icon
+      default: mdi:solar-power-variant
+      selector:
+        text:
+    color:
+      name: Color
+      default: "#FFC107"
+      selector:
+        text:
+
+mode: restart
+max_exceeded: silent
+
+trigger:
+  - trigger: state
+    entity_id: !input manual_mode_entity
+    id: mode_change
+  - trigger: time_pattern
+    minutes: !input update_interval
+    id: periodic
+
+variables:
+  manual_mode_entity: !input manual_mode_entity
+  solar_entity: !input solar_entity
+  consumption_entity: !input consumption_entity
+  grid_import_entity: !input grid_import_entity
+  grid_export_entity: !input grid_export_entity
+  battery1_entity: !input battery1_entity
+  battery2_entity: !input battery2_entity
+  storage_mode_entity: !input storage_mode_entity
+  site_limit_entity: !input site_limit_entity
+  import_price_entity: !input import_price_entity
+  export_price_entity: !input export_price_entity
+  activity_tag: !input activity_tag
+  icon: !input icon
+  color: !input color
+  notify_service: >-
+    {% if notify_device %}notify.mobile_app_{{ device_attr(notify_device, 'name') | slugify }}{% else %}notify.notify{% endif %}
+  is_manual: "{{ is_state(manual_mode_entity, 'on') }}"
+  solar_w: "{{ states(solar_entity) | float(0) | round(0) }}"
+  consumption_w: "{{ states(consumption_entity) | float(0) | round(0) }}"
+  grid_import_w: "{{ states(grid_import_entity) | float(0) | round(0) }}"
+  grid_export_w: "{{ states(grid_export_entity) | float(0) | round(0) }}"
+  net_grid_w: "{{ grid_import_w | float(0) - grid_export_w | float(0) }}"
+  battery1_pct: "{{ states(battery1_entity) | float(0) | round(0) }}"
+  battery2_pct: >-
+    {% if battery2_entity and states(battery2_entity) not in ['unknown','unavailable',''] %}{{ states(battery2_entity) | float(0) | round(0) }}{% else %}none{% endif %}
+  avg_battery_pct: >-
+    {% if battery2_pct != 'none' %}{{ ((battery1_pct | float(0)) + (battery2_pct | float(0))) / 2 | round(0) }}{% else %}{{ battery1_pct }}{% endif %}
+  storage_mode: >-
+    {% if storage_mode_entity and states(storage_mode_entity) not in ['unknown','unavailable',''] %}{{ states(storage_mode_entity) }}{% else %}none{% endif %}
+  site_limit: >-
+    {% if site_limit_entity and states(site_limit_entity) not in ['unknown','unavailable',''] %}{{ states(site_limit_entity) }}{% else %}none{% endif %}
+
+condition:
+  # Ignore periodic ticks once manual mode is off - the mode_change trigger
+  # already handles the clear-on-off case below.
+  - condition: template
+    value_template: "{{ trigger.id == 'mode_change' or is_manual }}"
+
+action:
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'mode_change' and not is_manual }}"
+        sequence:
+          - action: "{{ notify_service }}"
+            data:
+              message: clear_notification
+              data:
+                tag: "{{ activity_tag }}"
+    default:
+      - action: "{{ notify_service }}"
+        data:
+          title: >-
+            Solar · Manual Mode{% if storage_mode != 'none' %} ({{ storage_mode }}){% endif %}
+          message: >-
+            Solar {{ solar_w }}W · Home {{ consumption_w }}W{% if net_grid_w | float > 0 %} · Import {{ net_grid_w | round(0) }}W{% elif net_grid_w | float < 0 %} · Export {{ (net_grid_w | float * -1) | round(0) }}W{% else %} · Grid idle{% endif %} · Batt {{ battery1_pct }}%{% if battery2_pct != 'none' %}/{{ battery2_pct }}%{% endif %}{% if site_limit != 'none' %} · Limit {{ site_limit }}W{% endif %}
+          data:
+            tag: "{{ activity_tag }}"
+            live_update: true
+            critical_text: "{{ avg_battery_pct }}%"
+            progress: "{{ avg_battery_pct }}"
+            progress_max: 100
+            notification_icon: "{{ icon }}"
+            notification_icon_color: "{{ color }}"
+            color: "{{ color }}"
