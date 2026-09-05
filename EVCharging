@@ -1,0 +1,139 @@
+blueprint:
+  name: Live Activity - EV Charging
+  description: >
+    Pushes an iOS Live Activity / Android Live Update showing EV charging
+    progress on the Lock Screen. Starts when the car connects, updates on
+    meaningful battery-level steps (to avoid iOS throttling), and clears
+    the activity when the car disconnects and isn't charging.
+
+    Requires Home Assistant Core 2026.7.0+ and the companion app's Live
+    Activities feature (Labs, TestFlight on iOS 17.2+).
+  domain: automation
+  source_url: null
+  input:
+    notify_device:
+      name: Mobile App Device
+      description: >
+        The phone to send the Live Activity to. Assumes the notify service
+        is notify.mobile_app_<device name, slugified>.
+      selector:
+        device:
+          integration: mobile_app
+    charger_status_entity:
+      name: Charger Status Sensor
+      description: e.g. sensor.solaredge_ev_charger_charger_status (ready / active)
+      default: sensor.solaredge_ev_charger_charger_status
+      selector:
+        entity:
+          domain: sensor
+    car_status_entity:
+      name: Car Connection Status Sensor
+      description: e.g. sensor.solaredge_ev_charger_car_status (connected / disconnected)
+      default: sensor.solaredge_ev_charger_car_status
+      selector:
+        entity:
+          domain: sensor
+    battery_level_entity:
+      name: Battery Level Sensor
+      default: sensor.byd_sealion_7_battery_level
+      selector:
+        entity:
+          domain: sensor
+    charge_power_entity:
+      name: Charge Power Sensor (optional, shown in message while active)
+      default: sensor.solaredge_ev_charger_charge_power
+      selector:
+        entity:
+          domain: sensor
+    update_step:
+      name: Battery % Update Step
+      description: Only push an update every N percent, per Apple's throttling guidance.
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 20
+          unit_of_measurement: "%"
+    activity_tag:
+      name: Activity Tag
+      default: ev_charging
+      selector:
+        text:
+    icon:
+      name: Icon
+      default: mdi:ev-station
+      selector:
+        text:
+    color:
+      name: Color
+      default: "#4CAF50"
+      selector:
+        text:
+
+mode: restart
+max_exceeded: silent
+
+trigger:
+  - trigger: state
+    entity_id: !input charger_status_entity
+    id: charger_status
+  - trigger: state
+    entity_id: !input car_status_entity
+    id: car_status
+  - trigger: state
+    entity_id: !input battery_level_entity
+    id: battery_level
+
+variables:
+  charger_status_entity: !input charger_status_entity
+  car_status_entity: !input car_status_entity
+  battery_level_entity: !input battery_level_entity
+  charge_power_entity: !input charge_power_entity
+  update_step: !input update_step
+  activity_tag: !input activity_tag
+  icon: !input icon
+  color: !input color
+  notify_service: >-
+    {% if notify_device %}notify.mobile_app_{{ device_attr(notify_device, 'name') | slugify }}{% else %}notify.notify{% endif %}
+  battery_level: "{{ states(battery_level_entity) | int(0) }}"
+  is_active: "{{ is_state(charger_status_entity, 'active') }}"
+  is_connected: "{{ is_state(car_status_entity, 'connected') }}"
+  charge_power: "{{ states(charge_power_entity) }}"
+
+condition:
+  # Skip battery-level triggers unless they land on the configured step,
+  # so we don't spam pushes on every 1% reading.
+  - condition: template
+    value_template: >
+      {{ trigger.id != 'battery_level' or battery_level % update_step == 0 }}
+
+action:
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ not is_connected and not is_active }}"
+        sequence:
+          - action: "{{ notify_service }}"
+            data:
+              message: clear_notification
+              data:
+                tag: "{{ activity_tag }}"
+    default:
+      - action: "{{ notify_service }}"
+        data:
+          title: EV Charging
+          message: >-
+            {% if is_active %}
+              Charging · {{ battery_level }}%{% if charge_power not in ['unknown','unavailable',''] %} · {{ charge_power }} kW{% endif %}
+            {% else %}
+              Connected · Not Charging
+            {% endif %}
+          data:
+            tag: "{{ activity_tag }}"
+            live_update: true
+            critical_text: "{{ battery_level }}%"
+            progress: "{{ battery_level }}"
+            progress_max: 100
+            notification_icon: "{{ icon }}"
+            notification_icon_color: "{{ color }}"
+            color: "{{ color }}"
