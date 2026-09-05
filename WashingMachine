@@ -1,12 +1,12 @@
 blueprint:
-  name: Live Activity - Washing Machine
+  name: Live Activity - Laundry (Washer / Dryer)
   description: >
-    Pushes an iOS Live Activity / Android Live Update showing washing
-    machine progress on the Lock Screen. Updates on program/phase changes
-    immediately, and throttles the fast-changing percentage sensor to one
-    push every 30s (per Apple's rate-limit guidance) using mode: restart.
-    Optionally clears the activity a set number of minutes after the
-    cycle finishes.
+    One blueprint for either the washing machine or tumble dryer - pick
+    which with the Appliance dropdown, point the entity inputs at that
+    appliance's sensors. Uses the device-side chronometer timer (ticks on
+    its own, no repeated pushes) instead of a manually-updated percentage.
+    Only pushes a new update when the phase changes or the remaining/
+    start-in time actually shifts - never on every elapsed-time tick.
 
     Requires Home Assistant Core 2026.7.0+ and the companion app's Live
     Activities feature (Labs, TestFlight on iOS 17.2+).
@@ -17,34 +17,60 @@ blueprint:
       selector:
         device:
           integration: mobile_app
+    appliance:
+      name: Appliance
+      description: Controls the title and default icon only - point the entities below at whichever machine you pick.
+      default: "Washing Machine"
+      selector:
+        select:
+          options:
+            - "Washing Machine"
+            - "Tumble Dryer"
     operation_state_entity:
       name: Operation State Sensor
-      description: e.g. sensor.washing_machine (off / waiting_to_start / run / finished)
-      default: sensor.washing_machine
+      description: e.g. sensor.washing_machine or sensor.tumble_dryer
       selector:
         entity:
           domain: sensor
     program_entity:
-      name: Program Sensor
-      default: sensor.washing_machine_program
+      name: Program Sensor (optional)
+      default: ""
       selector:
         entity:
           domain: sensor
     phase_entity:
       name: Program Phase Sensor
-      default: sensor.washing_machine_program_phase
+      description: e.g. sensor.washing_machine_program_phase / sensor.tumble_dryer_program_phase
       selector:
         entity:
           domain: sensor
-    percentage_entity:
-      name: Percentage Complete Sensor (0-100)
-      default: sensor.washing_machine_percentage
+    start_in_entity:
+      name: Start-In Sensor
+      description: Time until a delayed start begins, e.g. sensor.washing_machine_start_in
       selector:
         entity:
           domain: sensor
+    elapsed_entity:
+      name: Elapsed Time Sensor
+      selector:
+        entity:
+          domain: sensor
+    remaining_entity:
+      name: Remaining Time Sensor
+      selector:
+        entity:
+          domain: sensor
+    time_unit:
+      name: Unit of Start-In/Elapsed/Remaining Sensors
+      default: hours
+      selector:
+        select:
+          options:
+            - hours
+            - minutes
     door_entity:
       name: Door Sensor (optional)
-      default: binary_sensor.washing_machine_door
+      default: ""
       selector:
         entity:
           domain: binary_sensor
@@ -56,7 +82,7 @@ blueprint:
         text:
     clear_after_minutes:
       name: Auto-Clear After Finished (minutes)
-      description: 0 disables auto-clear; the activity stays until the next cycle starts.
+      description: 0 disables auto-clear.
       default: 0
       selector:
         number:
@@ -65,16 +91,18 @@ blueprint:
           unit_of_measurement: min
     activity_tag:
       name: Activity Tag
-      default: washer_cycle
+      description: Must be unique - if you set this up for both washer and dryer, give each its own tag.
+      default: laundry_cycle
       selector:
         text:
-    icon:
-      name: Icon
-      default: mdi:washing-machine
+    icon_override:
+      name: Icon Override (optional)
+      description: Leave blank to auto-pick based on Appliance.
+      default: ""
       selector:
         text:
     color_running:
-      name: Color (Running)
+      name: Color (Running/Waiting)
       default: "#2196F3"
       selector:
         text:
@@ -90,37 +118,70 @@ max_exceeded: silent
 trigger:
   - trigger: state
     entity_id: !input operation_state_entity
-    id: cycle
+    id: op_state
   - trigger: state
-    entity_id: !input percentage_entity
-    id: percent
+    entity_id: !input phase_entity
+    id: phase
+  - trigger: state
+    entity_id: !input start_in_entity
+    id: start_in
+  - trigger: state
+    entity_id: !input remaining_entity
+    id: remaining
 
 variables:
+  appliance: !input appliance
   operation_state_entity: !input operation_state_entity
   program_entity: !input program_entity
   phase_entity: !input phase_entity
-  percentage_entity: !input percentage_entity
+  start_in_entity: !input start_in_entity
+  elapsed_entity: !input elapsed_entity
+  remaining_entity: !input remaining_entity
+  time_unit: !input time_unit
   door_entity: !input door_entity
   finished_states: !input finished_states
   clear_after_minutes: !input clear_after_minutes
   activity_tag: !input activity_tag
-  icon: !input icon
+  icon_override: !input icon_override
   color_running: !input color_running
   color_finished: !input color_finished
   notify_service: >-
     {% if notify_device %}notify.mobile_app_{{ device_attr(notify_device, 'name') | slugify }}{% else %}notify.notify{% endif %}
+  icon: >-
+    {% if icon_override %}{{ icon_override }}{% elif appliance == 'Tumble Dryer' %}mdi:tumble-dryer{% else %}mdi:washing-machine{% endif %}
+  unit_seconds: "{{ 3600 if time_unit == 'hours' else 60 }}"
   finished_list: "{{ finished_states.split(',') | map('trim') | list }}"
-  is_finished: "{{ states(operation_state_entity) in finished_list }}"
-  percentage: "{{ states(percentage_entity) | int(0) }}"
-  program: "{{ states(program_entity) }}"
-  phase: "{{ states(phase_entity) }}"
+  start_in_val: "{{ states(start_in_entity) | float(0) }}"
+  elapsed_val: "{{ states(elapsed_entity) | float(0) }}"
+  remaining_val: "{{ states(remaining_entity) | float(0) }}"
+  is_finished_state: "{{ states(operation_state_entity) in finished_list }}"
+  is_waiting: "{{ start_in_val > 0 }}"
+  is_running: "{{ not is_waiting and not is_finished_state and (elapsed_val > 0 or remaining_val > 0) }}"
+  is_finished: "{{ is_finished_state or (not is_waiting and not is_running) }}"
+  target_seconds: >-
+    {% if is_waiting %}{{ (start_in_val * unit_seconds) | round(0) }}{% elif is_running %}{{ (remaining_val * unit_seconds) | round(0) }}{% else %}0{% endif %}
+  percentage: >-
+    {% if is_waiting %}
+      {% set last = states[operation_state_entity].last_changed %}
+      {% set wait_elapsed = (as_timestamp(now()) - as_timestamp(last)) / 3600 %}
+      {% set original_delay = start_in_val + wait_elapsed %}
+      {{ ((start_in_val / original_delay * 100) | round(0)) if original_delay > 0 else 0 }}
+    {% elif is_running %}
+      {% set total = elapsed_val + remaining_val %}
+      {{ ((elapsed_val / total * 100) | round(0)) if total > 0 else 100 }}
+    {% else %}
+      100
+    {% endif %}
+  program_text: "{{ states(program_entity) if program_entity and states(program_entity) not in ['unknown','unavailable',''] else '' }}"
+  phase_text: "{{ states(phase_entity) if states(phase_entity) not in ['unknown','unavailable',''] else '' }}"
   door_open: "{{ door_entity and is_state(door_entity, 'on') }}"
+  status_message: >-
+    {% if is_waiting %}Starts in{% elif program_text and phase_text %}{{ program_text }} · {{ phase_text }}{% elif phase_text %}{{ phase_text }}{% else %}Running{% endif %}{% if door_open %} · Door Open{% endif %}
 
 action:
-  - if: "{{ trigger.id == 'percent' }}"
-    then:
-      # Collapse a burst of percentage ticks into one push every 30s.
-      - delay: "00:00:30"
+  # Collapse near-simultaneous sensor updates (phase + remaining often land together) into one push.
+  - delay:
+      seconds: 2
   - choose:
       - conditions:
           - condition: template
@@ -128,7 +189,7 @@ action:
         sequence:
           - action: "{{ notify_service }}"
             data:
-              title: Washing Machine
+              title: "{{ appliance }}"
               message: "Cycle complete"
               data:
                 tag: "{{ activity_tag }}"
@@ -147,17 +208,35 @@ action:
                   message: clear_notification
                   data:
                     tag: "{{ activity_tag }}"
+      - conditions:
+          - condition: template
+            value_template: "{{ target_seconds | int(0) > 0 }}"
+        sequence:
+          - action: "{{ notify_service }}"
+            data:
+              title: "{{ appliance }}"
+              message: "{{ status_message }}"
+              data:
+                tag: "{{ activity_tag }}"
+                live_update: true
+                progress: "{{ percentage | int(0) }}"
+                progress_max: 100
+                chronometer: true
+                when: "{{ target_seconds }}"
+                when_relative: true
+                notification_icon: "{{ icon }}"
+                notification_icon_color: "{{ color_running }}"
+                color: "{{ color_running }}"
     default:
+      # Fallback: not finished, but no usable timer target yet.
       - action: "{{ notify_service }}"
         data:
-          title: Washing Machine
-          message: >-
-            {{ program if program not in ['unknown','unavailable',''] else 'Running' }}{% if phase not in ['unknown','unavailable',''] %} · {{ phase }}{% endif %}{% if door_open %} · Door Open{% endif %}
+          title: "{{ appliance }}"
+          message: "{{ status_message }}"
           data:
             tag: "{{ activity_tag }}"
             live_update: true
-            critical_text: "{{ percentage }}%"
-            progress: "{{ percentage }}"
+            progress: "{{ percentage | int(0) }}"
             progress_max: 100
             notification_icon: "{{ icon }}"
             notification_icon_color: "{{ color_running }}"
