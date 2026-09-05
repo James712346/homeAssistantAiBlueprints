@@ -1,15 +1,13 @@
 blueprint:
   name: Live Activity - Solar Manual Mode
   description: >
-    Pushes an iOS Live Activity / Android Live Update with a solar/battery
-    stats snapshot while you're in manual solar control mode. Starts the
-    activity the moment manual mode is switched on, refreshes it on a
-    timer while it stays on (power values change too continuously to
-    trigger on every tick), and clears it when manual mode is switched
-    off.
-
-    Requires Home Assistant Core 2026.7.0+ and the companion app's Live
-    Activities feature (Labs, TestFlight on iOS 17.2+).
+    Live Activity showing grid import/export while in manual solar mode.
+    Bar fills red when importing, blue when exporting, green when neither
+    (capped at your kW setting). Text shows the direction, or home/solar
+    use when the grid is idle. Note: iOS shows its own auto-calculated
+    percentage next to the bar — that's separate from "critical_text" and
+    can't be replaced, only critical_text (here used for price) is fully
+    under our control.
   domain: automation
   input:
     notify_device:
@@ -47,30 +45,6 @@ blueprint:
       selector:
         entity:
           domain: sensor
-    battery1_entity:
-      name: Battery 1 State of Charge
-      default: sensor.solaredge_i1_b1_state_of_energy
-      selector:
-        entity:
-          domain: sensor
-    battery2_entity:
-      name: Battery 2 State of Charge (optional, leave blank if single battery)
-      default: sensor.solaredge_i1_b2_state_of_energy
-      selector:
-        entity:
-          domain: sensor
-    storage_mode_entity:
-      name: Storage Control Mode Select (optional)
-      default: select.solaredge_i1_storage_control_mode
-      selector:
-        entity:
-          domain: select
-    site_limit_entity:
-      name: Site/Export Limit Number (optional)
-      default: number.solaredge_i1_site_limit
-      selector:
-        entity:
-          domain: number
     import_price_entity:
       name: Import (General) Price Sensor
       default: sensor.home_general_price
@@ -164,10 +138,6 @@ variables:
   consumption_entity: !input consumption_entity
   grid_import_entity: !input grid_import_entity
   grid_export_entity: !input grid_export_entity
-  battery1_entity: !input battery1_entity
-  battery2_entity: !input battery2_entity
-  storage_mode_entity: !input storage_mode_entity
-  site_limit_entity: !input site_limit_entity
   import_price_entity: !input import_price_entity
   export_price_entity: !input export_price_entity
   grid_power_unit: !input grid_power_unit
@@ -190,13 +160,6 @@ variables:
   is_importing: "{{ net_kw | float(0) > (neutral_threshold_kw | float(0)) }}"
   is_exporting: "{{ net_kw | float(0) < -(neutral_threshold_kw | float(0)) }}"
   flow_magnitude_kw: "{{ [net_kw | float(0) | abs, grid_scale_max_kw | float(0)] | min }}"
-  battery1_pct: "{{ states(battery1_entity) | float(0) | round(0) }}"
-  battery2_pct: >-
-    {% if battery2_entity and states(battery2_entity) not in ['unknown','unavailable',''] %}{{ states(battery2_entity) | float(0) | round(0) }}{% else %}none{% endif %}
-  storage_mode: >-
-    {% if storage_mode_entity and states(storage_mode_entity) not in ['unknown','unavailable',''] %}{{ states(storage_mode_entity) }}{% else %}none{% endif %}
-  site_limit: >-
-    {% if site_limit_entity and states(site_limit_entity) not in ['unknown','unavailable',''] %}{{ states(site_limit_entity) }}{% else %}none{% endif %}
   import_price: >-
     {% if states(import_price_entity) not in ['unknown','unavailable',''] %}{{ '%.2f' | format(states(import_price_entity) | float(0)) }}{% else %}--{% endif %}
   export_price: >-
@@ -222,14 +185,14 @@ action:
     default:
       - action: "{{ notify_service }}"
         data:
-          title: >-
-            Solar · Manual Mode{% if storage_mode != 'none' %} ({{ storage_mode }}){% endif %}
+          title: Solar
           message: >-
-            {% if is_importing %}Importing {{ '%.1f' | format(net_kw | float(0)) }} kW{% elif is_exporting %}Exporting {{ '%.1f' | format(net_kw | float(0) | abs) }} kW{% else %}Home {{ '%.1f' | format(consumption_kw | float(0)) }} kW · Solar {{ '%.1f' | format(solar_kw | float(0)) }} kW{% endif %} · Batt {{ battery1_pct }}%{% if battery2_pct != 'none' %}/{{ battery2_pct }}%{% endif %}{% if site_limit != 'none' %} · Limit {{ site_limit }}{% endif %}
+            {% if is_importing %}Importing {{ '%.1f' | format(net_kw | float(0)) }} kW{% elif is_exporting %}Exporting {{ '%.1f' | format(net_kw | float(0) | abs) }} kW{% else %}Home {{ '%.1f' | format(consumption_kw | float(0)) }} kW · Solar {{ '%.1f' | format(solar_kw | float(0)) }} kW{% endif %}
           data:
             tag: "{{ activity_tag }}"
             live_update: true
-            critical_text: "↓${{ import_price }} ↑${{ export_price }}"
+            critical_text: >-
+              {% if is_importing %}${{ import_price }}{% elif is_exporting %}${{ export_price }}{% else %}{{ '' }}{% endif %}
             progress: "{{ flow_magnitude_kw }}"
             progress_max: "{{ grid_scale_max_kw }}"
             notification_icon: "{{ icon }}"
