@@ -9,7 +9,6 @@ blueprint:
     Requires Home Assistant Core 2026.7.0+ and the companion app's Live
     Activities feature (Labs, TestFlight on iOS 17.2+).
   domain: automation
-  source_url: https://raw.githubusercontent.com/James712346/homeAssistantAiBlueprints/refs/heads/main/EVCharging
   input:
     notify_device:
       name: Mobile App Device
