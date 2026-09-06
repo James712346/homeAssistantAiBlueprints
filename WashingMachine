@@ -182,8 +182,6 @@ action:
           data:
             tag: "{{ activity_tag }}"
             live_update: true
-            progress: "{{ percentage if percentage != 'none' else 0 }}"
-            progress_max: 100
             chronometer: true
             when: "{{ finish_epoch }}"
             when_relative: false
