@@ -1,5 +1,5 @@
 blueprint:
-  name: Live Activity - Laundry (Washer / Dryer) 0.1
+  name: Live Activity - Laundry (Washer / Dryer) 0.2
   description: >
     One blueprint for either the washing machine or tumble dryer - pick
     which with the Appliance dropdown, point the entities below at that
