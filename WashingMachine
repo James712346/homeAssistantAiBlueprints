@@ -1,5 +1,5 @@
 blueprint:
-  name: Live Activity - Laundry (Washer / Dryer) 1.0
+  name: Live Activity - Laundry (Washer / Dryer)
   description: >
     One blueprint for either the washing machine or tumble dryer - pick
     which with the Appliance dropdown, point the entities below at that
@@ -114,6 +114,9 @@ trigger:
   - trigger: state
     entity_id: !input finish_time_entity
     id: finish_time
+  - trigger: state
+    entity_id: !input operation_state_entity
+    id: op_state
 
 variables:
   appliance: !input appliance
@@ -145,6 +148,17 @@ variables:
     {% if percentage_entity and states(percentage_entity) not in ['unknown','unavailable',''] %}{{ states(percentage_entity) | float(0) | round(0) }}{% else %}none{% endif %}
   status_message: >-
     {% if program_text and phase_text %}{{ program_text }} · {{ phase_text }}{% elif phase_text %}{{ phase_text }}{% else %}Running{% endif %}{% if door_open %} · Door Open{% endif %}
+
+condition:
+  # No notify action configured - do nothing (no broadcast fallback).
+  - condition: template
+    value_template: "{{ (notify_service | trim) != '' }}"
+  # Don't act on stale phase/finish-time changes while the machine is
+  # already off - only the operation-state trigger itself (the actual
+  # finish, or a new cycle starting) can fire while it's off.
+  - condition: template
+    value_template: >-
+      {{ trigger.id == 'op_state' or states(operation_state_entity) not in finished_list }}
 
 action:
   # Collapse near-simultaneous phase/finish-time updates into one push.
