@@ -32,15 +32,13 @@ blueprint:
       description: Matched against the route_id attribute (the part before the dash), e.g. 196.
       selector:
         text:
-    stop_prefix:
-      name: Stop Entity Prefix
-      description: >
-        The arrival-sensor prefix up to and including "arrival_", e.g.
-        sensor.gladstone_rd_at_dornoch_terrace_stop_11_1164_arrival_
-        (sensors _1 through _4 will be checked).
-      default: sensor.gladstone_rd_at_dornoch_terrace_stop_11_1164_arrival_
+    arrival_sensors:
+      name: Arrival Sensors
+      description: Pick all of this stop's arrival sensors (usually the "_1" through "_4" ones).
       selector:
-        text:
+        entity:
+          domain: sensor
+          multiple: true
     days:
       name: Days to Run
       default:
@@ -132,7 +130,7 @@ trigger:
 variables:
   person_entity: !input person_entity
   route_number: !input route_number
-  stop_prefix: !input stop_prefix
+  arrival_sensors: !input arrival_sensors
   days: !input days
   end_time: !input end_time
   fallback_refresh_seconds: !input fallback_refresh_seconds
@@ -164,8 +162,7 @@ action:
         - variables:
             bus_matches: >-
               {% set ns = namespace(list=[]) %}
-              {% for i in range(1, 5) %}
-                {% set e = stop_prefix ~ i %}
+              {% for e in arrival_sensors %}
                 {% set rid = state_attr(e, 'route_id') or '' %}
                 {% set mins = states(e) | float(-1) %}
                 {% if rid.split('-')[0] == route_number and mins >= 0 %}
