@@ -10,11 +10,14 @@ blueprint:
     under our control.
   domain: automation
   input:
-    notify_device:
-      name: Mobile App Device
+    notify_action:
+      name: Notify Action
+      description: >
+        The exact notify action to call, e.g. notify.mobile_app_james_iphone.
+        Leave blank to disable pushes entirely - there is no broadcast fallback.
+      default: ""
       selector:
-        device:
-          integration: mobile_app
+        text:
     manual_mode_entity:
       name: Manual Mode Toggle
       default: input_boolean.toggle_solar_manual_control
@@ -163,9 +166,13 @@ variables:
   activity_tag: !input activity_tag
   icon: !input icon
   update_interval_seconds: !input update_interval_seconds
-  notify_service: >-
-    {% if notify_device %}notify.mobile_app_{{ device_attr(notify_device, 'name') | slugify }}{% else %}notify.notify{% endif %}
+  notify_service: !input notify_action
   unit_divisor: "{{ 1000 if grid_power_unit == 'W' else 1 }}"
+
+condition:
+  # No notify action configured - do nothing (no broadcast fallback).
+  - condition: template
+    value_template: "{{ notify_service | trim != '' }}"
 
 action:
   - choose:
