@@ -1,5 +1,5 @@
 blueprint:
-  name: Live Activity - EV Charging
+  name: Live Activity - EV Charging 1.o
   description: >
     Pushes an iOS Live Activity / Android Live Update showing EV charging
     progress on the Lock Screen. Starts when the car connects, updates on
@@ -9,15 +9,16 @@ blueprint:
     Requires Home Assistant Core 2026.7.0+ and the companion app's Live
     Activities feature (Labs, TestFlight on iOS 17.2+).
   domain: automation
+  source_url: null
   input:
-    notify_device:
-      name: Mobile App Device
+    notify_action:
+      name: Notify Action
       description: >
-        The phone to send the Live Activity to. Assumes the notify service
-        is notify.mobile_app_<device name, slugified>.
+        The exact notify action to call, e.g. notify.mobile_app_james_iphone.
+        Leave blank to disable pushes entirely - there is no broadcast fallback.
+      default: ""
       selector:
-        device:
-          integration: mobile_app
+        text:
     charger_status_entity:
       name: Charger Status Sensor
       description: e.g. sensor.solaredge_ev_charger_charger_status (ready / active)
@@ -92,14 +93,16 @@ variables:
   activity_tag: !input activity_tag
   icon: !input icon
   color: !input color
-  notify_service: >-
-    {% if notify_device %}notify.mobile_app_{{ device_attr(notify_device, 'name') | slugify }}{% else %}notify.notify{% endif %}
+  notify_service: !input notify_action
   battery_level: "{{ states(battery_level_entity) | int(0) }}"
   is_active: "{{ is_state(charger_status_entity, 'active') }}"
   is_connected: "{{ is_state(car_status_entity, 'connected') }}"
   charge_power: "{{ states(charge_power_entity) }}"
 
 condition:
+  # No notify action configured - do nothing (no broadcast fallback).
+  - condition: template
+    value_template: "{{ notify_service | trim != '' }}"
   # Skip battery-level triggers unless they land on the configured step,
   # so we don't spam pushes on every 1% reading.
   - condition: template
