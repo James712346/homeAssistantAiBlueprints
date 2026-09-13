@@ -1,0 +1,223 @@
+blueprint:
+  name: Live Activity - Bus to Work
+  description: >
+    Live Activity countdown for a specific bus route at one stop. Runs only
+    within the days/time window you set, and only while the chosen person
+    is home - it clears itself the moment you leave home or the window
+    ends. Pulses a light once when the bus gets inside your threshold.
+
+    Requires Home Assistant Core 2026.7.0+ and the companion app's Live
+    Activities feature (Labs, TestFlight on iOS 17.2+).
+  domain: automation
+  input:
+    notify_action:
+      name: Notify Action
+      description: >
+        The exact notify action to call, e.g. notify.mobile_app_james_iphone.
+        Leave blank to disable pushes entirely - there is no broadcast fallback.
+      default: ""
+      selector:
+        text:
+    person_entity:
+      name: Person
+      description: Only runs while this person is home; clears the activity the moment they leave.
+      selector:
+        entity:
+          domain: person
+    route_number:
+      name: Bus Route Number
+      description: Matched against the route_id attribute (the part before the dash), e.g. 196.
+      selector:
+        text:
+    stop_prefix:
+      name: Stop Entity Prefix
+      description: >
+        The arrival-sensor prefix up to and including "arrival_", e.g.
+        sensor.gladstone_rd_at_dornoch_terrace_stop_11_1164_arrival_
+        (sensors _1 through _4 will be checked).
+      default: sensor.gladstone_rd_at_dornoch_terrace_stop_11_1164_arrival_
+      selector:
+        text:
+    days:
+      name: Days to Run
+      default:
+        - mon
+        - tue
+        - wed
+        - thu
+        - fri
+      selector:
+        select:
+          multiple: true
+          options:
+            - mon
+            - tue
+            - wed
+            - thu
+            - fri
+            - sat
+            - sun
+    start_time:
+      name: Start Time
+      default: "07:00:00"
+      selector:
+        time:
+    end_time:
+      name: End Time
+      default: "09:00:00"
+      selector:
+        time:
+    refresh_interval_seconds:
+      name: Refresh Interval (seconds)
+      default: 30
+      selector:
+        number:
+          min: 20
+          max: 300
+          step: 5
+          unit_of_measurement: s
+    bar_max_minutes:
+      name: Progress Bar Max (minutes)
+      default: 15
+      selector:
+        number:
+          min: 5
+          max: 60
+          unit_of_measurement: min
+    pulse_light_entity:
+      name: Light to Pulse (optional)
+      description: Leave blank to disable.
+      default: ""
+      selector:
+        entity:
+          domain: light
+    pulse_threshold_minutes:
+      name: Pulse When Bus Is Within (minutes)
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 30
+          unit_of_measurement: min
+    activity_tag:
+      name: Activity Tag
+      default: bus_to_work
+      selector:
+        text:
+    icon:
+      name: Icon
+      default: mdi:bus
+      selector:
+        text:
+    color:
+      name: Color
+      default: "#3F51B5"
+      selector:
+        text:
+
+mode: restart
+max_exceeded: silent
+
+trigger:
+  - trigger: time
+    at: !input start_time
+
+variables:
+  person_entity: !input person_entity
+  route_number: !input route_number
+  stop_prefix: !input stop_prefix
+  days: !input days
+  end_time: !input end_time
+  refresh_interval_seconds: !input refresh_interval_seconds
+  bar_max_minutes: !input bar_max_minutes
+  pulse_light_entity: !input pulse_light_entity
+  pulse_threshold_minutes: !input pulse_threshold_minutes
+  activity_tag: !input activity_tag
+  icon: !input icon
+  color: !input color
+  notify_service: !input notify_action
+  has_pulsed: false
+
+condition:
+  - condition: time
+    weekday: !input days
+  # No notify action configured - do nothing (no broadcast fallback).
+  - condition: template
+    value_template: "{{ (notify_service | trim) != '' }}"
+
+action:
+  - repeat:
+      while:
+        - condition: template
+          value_template: >-
+            {{ now().time() < strptime(end_time, '%H:%M:%S').time() and is_state(person_entity, 'home') }}
+      sequence:
+        - variables:
+            next_bus_minutes: >-
+              {% set ns = namespace(next=none) %}
+              {% for i in range(1, 5) %}
+                {% set e = stop_prefix ~ i %}
+                {% set rid = state_attr(e, 'route_id') or '' %}
+                {% set mins = states(e) | float(-1) %}
+                {% if ns.next is none and rid.split('-')[0] == route_number and mins >= 0 %}
+                  {% set ns.next = mins | round(0) %}
+                {% endif %}
+              {% endfor %}
+              {{ ns.next if ns.next is not none else 'none' }}
+            has_bus: "{{ next_bus_minutes != 'none' }}"
+            bar_progress: >-
+              {% if has_bus %}{{ [bar_max_minutes | float(0) - (next_bus_minutes | float(0)), 0] | max }}{% else %}0{% endif %}
+        - action: "{{ notify_service }}"
+          data:
+            title: Bus to Work
+            message: >-
+              {% if has_bus %}Route {{ route_number }} in {{ next_bus_minutes }} min{% else %}No route {{ route_number }} arrival found{% endif %}
+            data:
+              tag: "{{ activity_tag }}"
+              live_update: true
+              progress: "{{ bar_progress }}"
+              progress_max: "{{ bar_max_minutes }}"
+              chronometer: "{{ has_bus }}"
+              when: "{{ (next_bus_minutes | float(0) * 60) | round(0) if has_bus else 0 }}"
+              when_relative: true
+              notification_icon: "{{ icon }}"
+              notification_icon_color: "{{ color }}"
+              color: "{{ color }}"
+        - if: >-
+            {{ pulse_light_entity and has_bus and not has_pulsed
+               and next_bus_minutes | float(0) <= pulse_threshold_minutes | float(0) }}
+          then:
+            - variables:
+                pulse_was_on: "{{ is_state(pulse_light_entity, 'on') }}"
+                pulse_prior_brightness: "{{ state_attr(pulse_light_entity, 'brightness') }}"
+            - repeat:
+                count: 3
+                sequence:
+                  - action: light.turn_on
+                    target:
+                      entity_id: "{{ pulse_light_entity }}"
+                    data:
+                      brightness_pct: 100
+                  - delay:
+                      milliseconds: 500
+                  - action: light.turn_off
+                    target:
+                      entity_id: "{{ pulse_light_entity }}"
+                  - delay:
+                      milliseconds: 500
+            - if: "{{ pulse_was_on }}"
+              then:
+                - action: light.turn_on
+                  target:
+                    entity_id: "{{ pulse_light_entity }}"
+                  data: >-
+                    {% if pulse_prior_brightness not in [none, 'none'] %}{{ {'brightness': pulse_prior_brightness | int} }}{% else %}{}{% endif %}
+            - variables:
+                has_pulsed: true
+        - delay:
+            seconds: "{{ refresh_interval_seconds }}"
+  - action: "{{ notify_service }}"
+    data:
+      message: clear_notification
+      data:
+        tag: "{{ activity_tag }}"
