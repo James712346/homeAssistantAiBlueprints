@@ -4,7 +4,10 @@ blueprint:
     Live Activity countdown for a specific bus route at one stop. Runs only
     within the days/time window you set, and only while the chosen person
     is home - it clears itself the moment you leave home or the window
-    ends. Pulses a light once when the bus gets inside your threshold.
+    ends. Updates immediately whenever the live arrival estimate changes
+    (not on a fixed timer), shows a backup "next after" arrival alongside
+    the primary one in case you miss it, and pulses a light once when the
+    bus gets inside your threshold.
 
     Requires Home Assistant Core 2026.7.0+ and the companion app's Live
     Activities feature (Labs, TestFlight on iOS 17.2+).
@@ -67,9 +70,13 @@ blueprint:
       default: "09:00:00"
       selector:
         time:
-    refresh_interval_seconds:
-      name: Refresh Interval (seconds)
-      default: 30
+    fallback_refresh_seconds:
+      name: Fallback Refresh (seconds)
+      description: >
+        The activity updates immediately whenever the arrival sensors
+        change - this is just a safety-net interval to recheck the
+        schedule/presence conditions if nothing changes for a while.
+      default: 60
       selector:
         number:
           min: 20
@@ -128,7 +135,7 @@ variables:
   stop_prefix: !input stop_prefix
   days: !input days
   end_time: !input end_time
-  refresh_interval_seconds: !input refresh_interval_seconds
+  fallback_refresh_seconds: !input fallback_refresh_seconds
   bar_max_minutes: !input bar_max_minutes
   pulse_light_entity: !input pulse_light_entity
   pulse_threshold_minutes: !input pulse_threshold_minutes
@@ -146,6 +153,8 @@ condition:
     value_template: "{{ (notify_service | trim) != '' }}"
 
 action:
+  - variables:
+      prev_signature: ""
   - repeat:
       while:
         - condition: template
@@ -153,36 +162,43 @@ action:
             {{ now().time() < strptime(end_time, '%H:%M:%S').time() and is_state(person_entity, 'home') }}
       sequence:
         - variables:
-            next_bus_minutes: >-
-              {% set ns = namespace(next=none) %}
+            bus_matches: >-
+              {% set ns = namespace(list=[]) %}
               {% for i in range(1, 5) %}
                 {% set e = stop_prefix ~ i %}
                 {% set rid = state_attr(e, 'route_id') or '' %}
                 {% set mins = states(e) | float(-1) %}
-                {% if ns.next is none and rid.split('-')[0] == route_number and mins >= 0 %}
-                  {% set ns.next = mins | round(0) %}
+                {% if rid.split('-')[0] == route_number and mins >= 0 %}
+                  {% set ns.list = ns.list + [mins | round(0)] %}
                 {% endif %}
               {% endfor %}
-              {{ ns.next if ns.next is not none else 'none' }}
-            has_bus: "{{ next_bus_minutes != 'none' }}"
+              {{ ns.list | sort }}
+            has_bus: "{{ bus_matches | length > 0 }}"
+            next_bus_minutes: "{{ bus_matches[0] if has_bus else 'none' }}"
+            after_next_minutes: "{{ bus_matches[1] if bus_matches | length > 1 else 'none' }}"
             bar_progress: >-
               {% if has_bus %}{{ [bar_max_minutes | float(0) - (next_bus_minutes | float(0)), 0] | max }}{% else %}0{% endif %}
-        - action: "{{ notify_service }}"
-          data:
-            title: Bus to Work
-            message: >-
-              {% if has_bus %}Route {{ route_number }} in {{ next_bus_minutes }} min{% else %}No route {{ route_number }} arrival found{% endif %}
-            data:
-              tag: "{{ activity_tag }}"
-              live_update: true
-              progress: "{{ bar_progress }}"
-              progress_max: "{{ bar_max_minutes }}"
-              chronometer: "{{ has_bus }}"
-              when: "{{ (next_bus_minutes | float(0) * 60) | round(0) if has_bus else 0 }}"
-              when_relative: true
-              notification_icon: "{{ icon }}"
-              notification_icon_color: "{{ color }}"
-              color: "{{ color }}"
+            current_signature: "{{ next_bus_minutes ~ '|' ~ after_next_minutes }}"
+        - if: "{{ current_signature != prev_signature }}"
+          then:
+            - action: "{{ notify_service }}"
+              data:
+                title: Bus to Work
+                message: >-
+                  {% if has_bus %}Route {{ route_number }} in {{ next_bus_minutes }} min{% if after_next_minutes != 'none' %} (next: {{ after_next_minutes }} min){% endif %}{% else %}No route {{ route_number }} arrival found{% endif %}
+                data:
+                  tag: "{{ activity_tag }}"
+                  live_update: true
+                  progress: "{{ bar_progress }}"
+                  progress_max: "{{ bar_max_minutes }}"
+                  chronometer: "{{ has_bus }}"
+                  when: "{{ (next_bus_minutes | float(0) * 60) | round(0) if has_bus else 0 }}"
+                  when_relative: true
+                  notification_icon: "{{ icon }}"
+                  notification_icon_color: "{{ color }}"
+                  color: "{{ color }}"
+            - variables:
+                prev_signature: "{{ current_signature }}"
         - if: >-
             {{ pulse_light_entity and has_bus and not has_pulsed
                and next_bus_minutes | float(0) <= pulse_threshold_minutes | float(0) }}
@@ -214,8 +230,12 @@ action:
                     {% if pulse_prior_brightness not in [none, 'none'] %}{{ {'brightness': pulse_prior_brightness | int} }}{% else %}{}{% endif %}
             - variables:
                 has_pulsed: true
-        - delay:
-            seconds: "{{ refresh_interval_seconds }}"
+        - wait_for_trigger:
+            - trigger: state
+              entity_id: >-
+                {{ [stop_prefix ~ '1', stop_prefix ~ '2', stop_prefix ~ '3', stop_prefix ~ '4'] }}
+          timeout:
+            seconds: "{{ fallback_refresh_seconds }}"
   - action: "{{ notify_service }}"
     data:
       message: clear_notification
