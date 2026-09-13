@@ -1,0 +1,211 @@
+blueprint:
+  name: Nearest Bus Stop Check
+  description: >
+    A script you trigger from a dashboard button (tap_action calling
+    script.<this> - no data needed). Identifies who tapped it via
+    context.user_id, matches that to their person entity, finds their
+    nearest stop from your Stops list (using each stop's first sensor's
+    latitude/longitude attributes), works out the next matching bus there,
+    and pushes it as a Live Activity to that person's phone.
+
+    Person Notify Map is an object mapping each person entity to their
+    notify action, e.g.:
+      person.james_prince: notify.mobile_app_james_iphone
+      person.liang: notify.mobile_app_liang_iphone
+
+    Stops is a list - just paste in each stop's own arrival sensors to add
+    one, no blueprint changes needed, e.g.:
+      - name: Gladstone Rd
+        sensors:
+          - sensor.gladstone_rd_at_dornoch_terrace_stop_11_1164_arrival_1
+          - sensor.gladstone_rd_at_dornoch_terrace_stop_11_1164_arrival_2
+          - sensor.gladstone_rd_at_dornoch_terrace_stop_11_1164_arrival_3
+          - sensor.gladstone_rd_at_dornoch_terrace_stop_11_1164_arrival_4
+      - name: Adelaide St
+        sensors:
+          - sensor.adelaide_street_stop_37_near_anzac_square_37_arrival_1
+          - sensor.adelaide_street_stop_37_near_anzac_square_37_arrival_2
+
+    Note: context.user_id is only populated when the caller's context
+    carries a real Home Assistant user - i.e. calling it via a dashboard
+    tap_action while logged in as that person's HA user. Calling it from
+    Developer Tools or another automation with no user context will leave
+    it empty and the script will do nothing (each person's HA user account
+    needs to be linked to their person entity under Settings > People).
+
+    Requires Home Assistant Core 2026.7.0+ and the companion app's Live
+    Activities feature (Labs, TestFlight on iOS 17.2+).
+  domain: script
+  input:
+    person_notify_map:
+      name: Person Notify Map
+      description: Object mapping each person entity to their notify action.
+      selector:
+        object:
+    stops:
+      name: Stops
+      description: List of stops, each with a name and its list of arrival sensors. Add more stops by adding more list entries - no blueprint edits needed.
+      selector:
+        object:
+    route_number:
+      name: Bus Route Number (optional)
+      description: Matched against the route_id attribute (part before the dash). Leave blank to just show the soonest bus of any route.
+      default: ""
+      selector:
+        text:
+    bar_max_minutes:
+      name: Progress Bar Max (minutes)
+      default: 15
+      selector:
+        number:
+          min: 5
+          max: 60
+          unit_of_measurement: min
+    refresh_interval_seconds:
+      name: Refresh Interval (seconds)
+      description: How often to recheck the bus while tracking.
+      default: 20
+      selector:
+        number:
+          min: 20
+          max: 300
+          step: 5
+          unit_of_measurement: s
+    jump_threshold_minutes:
+      name: Jump Threshold (minutes)
+      description: >
+        If the arrival estimate suddenly increases by more than this from
+        the previous reading, treat it as the tracked bus having already
+        gone and stop tracking (rather than a normal countdown tick).
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 30
+          unit_of_measurement: min
+    clear_after_minutes:
+      name: Auto-Clear After Ending (minutes)
+      description: 0 disables auto-clear; the final message stays until you dismiss it.
+      default: 5
+      selector:
+        number:
+          min: 0
+          max: 60
+          unit_of_measurement: min
+    activity_tag_prefix:
+      name: Activity Tag Prefix
+      description: Final tag is this plus the person's object_id, so each person gets their own activity.
+      default: bus_check_
+      selector:
+        text:
+    icon:
+      name: Icon
+      default: mdi:bus-stop
+      selector:
+        text:
+    color:
+      name: Color
+      default: "#3F51B5"
+      selector:
+        text:
+
+sequence:
+  - variables:
+      person_notify_map: !input person_notify_map
+      stops: !input stops
+      route_number: !input route_number
+      bar_max_minutes: !input bar_max_minutes
+      refresh_interval_seconds: !input refresh_interval_seconds
+      jump_threshold_minutes: !input jump_threshold_minutes
+      clear_after_minutes: !input clear_after_minutes
+      activity_tag_prefix: !input activity_tag_prefix
+      icon: !input icon
+      color: !input color
+      person_entity: >-
+        {{ states.person | selectattr('attributes.user_id', 'eq', context.user_id) | map(attribute='entity_id') | first | default('') }}
+      notify_service: "{{ person_notify_map.get(person_entity, '') if person_entity else '' }}"
+      activity_tag: "{{ activity_tag_prefix ~ (person_entity.split('.')[1] if person_entity else 'unknown') }}"
+      prev_mins: null
+      end_reason: ""
+  - if: "{{ person_entity != '' and notify_service != '' }}"
+    then:
+      - variables:
+          nearest_stop: >-
+            {% set ns = namespace(best=none, best_dist=999999) %}
+            {% for s in stops %}
+              {% set ref = s.sensors[0] %}
+              {% set d = distance(person_entity, ref) %}
+              {% if d is not none and d < ns.best_dist %}
+                {% set ns.best_dist = d %}
+                {% set ns.best = s %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.best if ns.best is not none else none }}
+      - if: "{{ nearest_stop is not none }}"
+        then:
+          - repeat:
+              until:
+                - condition: template
+                  value_template: "{{ end_reason != '' }}"
+              sequence:
+                - variables:
+                    next_bus: >-
+                      {% set ns = namespace(mins=none, route=none) %}
+                      {% for e in nearest_stop.sensors %}
+                        {% set mins = states(e) | float(-1) %}
+                        {% set rid = (state_attr(e, 'route_id') or '').split('-')[0] %}
+                        {% if mins >= 0 and (route_number == '' or rid == route_number) %}
+                          {% if ns.mins is none or mins < ns.mins %}
+                            {% set ns.mins = mins | round(0) %}
+                            {% set ns.route = rid %}
+                          {% endif %}
+                        {% endif %}
+                      {% endfor %}
+                      {{ {'mins': ns.mins, 'route': ns.route} }}
+                    has_bus: "{{ next_bus.mins is not none }}"
+                - variables:
+                    end_reason: >-
+                      {%- if not has_bus -%}no_bus
+                      {%- elif next_bus.mins | float(0) <= 0 -%}arrived
+                      {%- elif prev_mins is not none and (next_bus.mins | float(0)) > (prev_mins | float(0) + jump_threshold_minutes | float(0)) -%}jumped
+                      {%- else -%}{%- endif -%}
+                    bar_progress: >-
+                      {% if has_bus %}{{ [bar_max_minutes | float(0) - (next_bus.mins | float(0)), 0] | max }}{% else %}0{% endif %}
+                - action: "{{ notify_service }}"
+                  data:
+                    title: "{{ nearest_stop.name }}"
+                    message: >-
+                      {% if end_reason == 'arrived' %}Bus has arrived{% elif end_reason == 'jumped' %}Bus already gone - next in {{ next_bus.mins }} min{% elif end_reason == 'no_bus' %}No matching bus found{% else %}Route {{ next_bus.route }} in {{ next_bus.mins }} min{% endif %}
+                    data:
+                      tag: "{{ activity_tag }}"
+                      live_update: true
+                      progress: "{{ bar_progress }}"
+                      progress_max: "{{ bar_max_minutes }}"
+                      chronometer: "{{ has_bus and end_reason == '' }}"
+                      when: "{{ (next_bus.mins | float(0) * 60) | round(0) if has_bus else 0 }}"
+                      when_relative: true
+                      notification_icon: "{{ icon }}"
+                      notification_icon_color: "{{ color }}"
+                      color: "{{ color }}"
+                - variables:
+                    prev_mins: "{{ next_bus.mins if has_bus else prev_mins }}"
+                - if: "{{ end_reason == '' }}"
+                  then:
+                    - delay:
+                        seconds: "{{ refresh_interval_seconds }}"
+          - if: "{{ clear_after_minutes | int(0) > 0 }}"
+            then:
+              - delay:
+                  minutes: "{{ clear_after_minutes | int(0) }}"
+              - action: "{{ notify_service }}"
+                data:
+                  message: clear_notification
+                  data:
+                    tag: "{{ activity_tag }}"
+        else:
+          - action: "{{ notify_service }}"
+            data:
+              title: Bus Check
+              message: "No nearby stop found"
+              data:
+                tag: "{{ activity_tag }}"
